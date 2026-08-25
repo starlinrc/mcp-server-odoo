@@ -6,7 +6,7 @@ and functionality through the Model Context Protocol.
 
 import asyncio
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from mcp.server import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -20,6 +20,14 @@ from .error_handling import (
     error_handler,
 )
 from .logging_config import get_logger, logging_config, perf_logger
+from .multiuser import (
+    AccessControllerProxy,
+    ConnectionProxy,
+    MissingSessionCredentialsError,
+    SessionBindingApp,
+    SessionConnectionPool,
+    extract_session_credentials,
+)
 from .odoo_connection import OdooConnection, OdooConnectionError
 from .performance import PerformanceManager
 from .resources import register_resources
@@ -63,6 +71,18 @@ class OdooMCPServer:
         # Serializes connection setup/reauth across concurrent lifespan
         # entries (streamable-http enters the lifespan per session)
         self._connect_lock = asyncio.Lock()
+
+        # Multi-user mode: each caller authenticates with their own Odoo
+        # identity (see multiuser.py) instead of everyone sharing
+        # self.connection. None when the feature is off — the fast path
+        # used by every other deployment stays untouched.
+        self._session_pool: Optional[SessionConnectionPool] = (
+            SessionConnectionPool(
+                self.config, idle_timeout=self.config.session_connection_idle_timeout
+            )
+            if self.config.per_session_auth
+            else None
+        )
 
         # Configure transport security for DNS rebinding protection. Left as
         # None (no allowed_hosts configured) the SDK middleware defaults to
@@ -140,6 +160,17 @@ class OdooMCPServer:
             ConnectionError: If connection fails
             ConfigurationError: If configuration is invalid
         """
+        if (
+            self._session_pool is not None
+            and not self.connection
+            and not (self.config.api_key or (self.config.username and self.config.password))
+        ):
+            logger.info(
+                "Per-session auth enabled with no global fallback credentials — "
+                "skipping eager connection; each call authenticates as its own caller"
+            )
+            return
+
         if self.connection and self.connection.is_authenticated:
             logger.info("Reusing existing authenticated Odoo connection")
             return
@@ -223,6 +254,30 @@ class OdooMCPServer:
                 self.resource_handler = None
                 self.tool_handler = None
 
+    async def _resolve_connection(self, ctx: Any) -> Tuple[OdooConnection, AccessController]:
+        """Resolve which Odoo identity a single tool/resource call should use.
+
+        Called by SessionBindingApp before every tool/resource invocation
+        when per-session auth is enabled. A caller that sends the configured
+        headers gets its own pooled connection; a caller that doesn't falls
+        back to the shared connection when one is configured, or gets a
+        clear error when it isn't.
+        """
+        creds = extract_session_credentials(
+            ctx, self.config.session_user_header, self.config.session_api_key_header
+        )
+        if creds is not None:
+            return await self._session_pool.get(creds)
+
+        if self.connection and self.access_controller:
+            return self.connection, self.access_controller
+
+        raise MissingSessionCredentialsError(
+            "This server requires per-user Odoo credentials. Configure the "
+            f"{self.config.session_user_header} and {self.config.session_api_key_header} "
+            "headers in your MCP client."
+        )
+
     def _register_resources(self):
         """Register resource handlers after connection is established.
 
@@ -232,7 +287,15 @@ class OdooMCPServer:
         if self.resource_handler is not None:
             logger.debug("Resources already registered, skipping")
             return
-        if self.connection and self.access_controller:
+        if self._session_pool is not None:
+            self.resource_handler = register_resources(
+                SessionBindingApp(self.app, self._resolve_connection),
+                ConnectionProxy(),
+                AccessControllerProxy(),
+                self.config,
+            )
+            logger.info("Registered MCP resources (per-session auth)")
+        elif self.connection and self.access_controller:
             self.resource_handler = register_resources(
                 self.app, self.connection, self.access_controller, self.config
             )
@@ -246,7 +309,15 @@ class OdooMCPServer:
         if self.tool_handler is not None:
             logger.debug("Tools already registered, skipping")
             return
-        if self.connection and self.access_controller:
+        if self._session_pool is not None:
+            self.tool_handler = register_tools(
+                SessionBindingApp(self.app, self._resolve_connection),
+                ConnectionProxy(),
+                AccessControllerProxy(),
+                self.config,
+            )
+            logger.info("Registered MCP tools (per-session auth)")
+        elif self.connection and self.access_controller:
             self.tool_handler = register_tools(
                 self.app, self.connection, self.access_controller, self.config
             )
@@ -290,7 +361,11 @@ class OdooMCPServer:
             self.app.settings.host = host
             self.app.settings.port = port
             self._preseed_session_manager()
-            await self.app.run_streamable_http_async()
+            try:
+                await self.app.run_streamable_http_async()
+            finally:
+                if self._session_pool is not None:
+                    await self._session_pool.close_all()
         except KeyboardInterrupt:
             logger.info("Server interrupted by user")
         except (OdooConnectionError, ConfigurationError):
@@ -401,12 +476,16 @@ class OdooMCPServer:
             Dict with health status
         """
         is_connected = bool(self.connection is not None and self.connection.is_authenticated)
+        # Per-session auth authenticates lazily, per caller — no global
+        # connection is expected until someone without a fallback calls in.
+        healthy = is_connected or self._session_pool is not None
 
         return {
-            "status": "healthy" if is_connected else "unhealthy",
+            "status": "healthy" if healthy else "unhealthy",
             "version": SERVER_VERSION,
             "connection": {
                 "connected": is_connected,
+                "per_session_auth": self._session_pool is not None,
             },
         }
 

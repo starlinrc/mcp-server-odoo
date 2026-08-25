@@ -329,6 +329,31 @@ The server requires the following environment variables:
 | `ODOO_MCP_PORT` | `8000` | Port to bind for HTTP transport |
 | `ODOO_MCP_ALLOWED_HOSTS` | — | Comma-separated `Host` headers to accept for HTTP transport (DNS-rebinding protection). Set when running `streamable-http` behind a reverse proxy that forwards an external host, e.g. `odoo.example.com,localhost`. Unset leaves the default (no host validation). |
 | `ODOO_MCP_SESSION_IDLE_TIMEOUT` | — | Seconds of inactivity before a `streamable-http` session is closed and its server-side state freed, e.g. `600`. Unset means sessions never expire. |
+| `ODOO_MCP_PER_SESSION_AUTH` | `false` | Enable multi-user mode — each caller authenticates as their own Odoo user via HTTP headers instead of everyone sharing `ODOO_API_KEY`/`ODOO_USER`. Requires `ODOO_MCP_TRANSPORT=streamable-http`. See [Multi-User Mode](#multi-user-mode) below. |
+| `ODOO_MCP_SESSION_USER_HEADER` | `X-Odoo-User` | HTTP header carrying the caller's Odoo username, used when `ODOO_MCP_PER_SESSION_AUTH=true` |
+| `ODOO_MCP_SESSION_API_KEY_HEADER` | `X-Odoo-Api-Key` | HTTP header carrying the caller's Odoo API key, used when `ODOO_MCP_PER_SESSION_AUTH=true` |
+| `ODOO_MCP_SESSION_CONNECTION_IDLE_TIMEOUT` | `1800` | Seconds a per-user connection may sit idle before it's disconnected and evicted from the pool |
+
+### Multi-User Mode
+
+By default every MCP client shares the single Odoo identity from `ODOO_API_KEY`/`ODOO_USER`, so every create, edit, and delete made through the AI assistant is attributed in Odoo to that one account — regardless of who's actually talking to it. For a `streamable-http` deployment shared by a team, that breaks audit trails and per-user permissions.
+
+Setting `ODOO_MCP_PER_SESSION_AUTH=true` lets each caller bring their own Odoo identity instead, via two HTTP headers on every request (`X-Odoo-User` / `X-Odoo-Api-Key` by default — configurable, see the table above):
+
+1. Each user generates their own API key in Odoo: **Preferences > Account Security > New API Key**.
+2. They add `X-Odoo-User` and `X-Odoo-Api-Key` as custom headers when configuring this server in their MCP client, using their own username and key.
+3. Calls that include valid headers run as that user. Calls that don't fall back to the shared `ODOO_API_KEY`/`ODOO_USER` credentials if those are still configured, or fail with a clear error if they aren't — so you can roll this out gradually: turn the flag on with the shared credentials still in place, confirm it works for one user, then have the rest of the team configure their headers.
+
+```bash
+export ODOO_MCP_TRANSPORT=streamable-http
+export ODOO_MCP_PER_SESSION_AUTH=true
+# Optional fallback for clients that haven't configured headers yet
+export ODOO_API_KEY=shared-fallback-key
+export ODOO_USER=shared-fallback-user
+uvx mcp-server-odoo
+```
+
+Each distinct set of credentials gets its own pooled, authenticated connection to Odoo, reused across calls and evicted after `ODOO_MCP_SESSION_CONNECTION_IDLE_TIMEOUT` seconds of inactivity — so this doesn't add a login round trip to every tool call.
 
 ### Transport Options
 

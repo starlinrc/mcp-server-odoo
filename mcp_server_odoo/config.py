@@ -54,6 +54,16 @@ class OdooConfig:
     # Allowed hosts for DNS rebinding protection (HTTP transport)
     allowed_hosts: list[str] = field(default_factory=list)
 
+    # Multi-user mode (streamable-http only): when enabled, each caller may
+    # supply their own Odoo identity via HTTP headers instead of everyone
+    # sharing the credentials below. Those credentials become an optional
+    # fallback for calls that don't send the headers (e.g. stdio, or a
+    # client that hasn't been configured yet).
+    per_session_auth: bool = False
+    session_user_header: str = "X-Odoo-User"
+    session_api_key_header: str = "X-Odoo-Api-Key"
+    session_connection_idle_timeout: float = 1800.0
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Validate URL
@@ -72,20 +82,34 @@ class OdooConfig:
                 f"Must be one of: {', '.join(valid_yolo_modes)}"
             )
 
-        # Validate authentication (relaxed for YOLO mode)
+        # Validate authentication (relaxed for YOLO mode, and relaxed further
+        # when per_session_auth is on — callers bring their own credentials
+        # per request, so no global fallback is required at startup).
         has_api_key = bool(self.api_key)
         has_credentials = bool(self.username and self.password)
 
-        # In YOLO mode, we might need username even with API key for standard auth
-        if self.is_yolo_enabled:
-            if not has_credentials and not (has_api_key and self.username):
-                raise ValueError("YOLO mode requires either username/password or username/API key")
-        else:
-            if not has_api_key and not has_credentials:
-                raise ValueError(
-                    "Authentication required: provide either ODOO_API_KEY or "
-                    "both ODOO_USER and ODOO_PASSWORD"
-                )
+        if not self.per_session_auth:
+            # In YOLO mode, we might need username even with API key for standard auth
+            if self.is_yolo_enabled:
+                if not has_credentials and not (has_api_key and self.username):
+                    raise ValueError(
+                        "YOLO mode requires either username/password or username/API key"
+                    )
+            else:
+                if not has_api_key and not has_credentials:
+                    raise ValueError(
+                        "Authentication required: provide either ODOO_API_KEY or "
+                        "both ODOO_USER and ODOO_PASSWORD"
+                    )
+
+        if self.per_session_auth and self.transport != "streamable-http":
+            raise ValueError(
+                "ODOO_MCP_PER_SESSION_AUTH requires ODOO_MCP_TRANSPORT=streamable-http "
+                "(stdio has no per-request HTTP headers to carry credentials)"
+            )
+
+        if self.session_connection_idle_timeout <= 0:
+            raise ValueError("ODOO_MCP_SESSION_CONNECTION_IDLE_TIMEOUT must be positive")
 
         # Validate numeric fields
         if self.default_limit <= 0:
@@ -285,6 +309,17 @@ def load_config(env_file: Optional[Path] = None) -> OdooConfig:
         yolo_mode=get_yolo_mode(),
         enable_method_calls=get_bool_env("ODOO_MCP_ENABLE_METHOD_CALLS", False),
         allowed_hosts=parse_allowed_hosts(),
+        per_session_auth=get_bool_env("ODOO_MCP_PER_SESSION_AUTH", False),
+        session_user_header=os.getenv("ODOO_MCP_SESSION_USER_HEADER", "X-Odoo-User").strip()
+        or "X-Odoo-User",
+        session_api_key_header=os.getenv(
+            "ODOO_MCP_SESSION_API_KEY_HEADER", "X-Odoo-Api-Key"
+        ).strip()
+        or "X-Odoo-Api-Key",
+        session_connection_idle_timeout=get_optional_float_env(
+            "ODOO_MCP_SESSION_CONNECTION_IDLE_TIMEOUT"
+        )
+        or 1800.0,
     )
 
     return config

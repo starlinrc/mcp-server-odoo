@@ -59,6 +59,16 @@ Optional environment variables:
                            DNS rebinding protection (e.g., odoo.example.com,localhost)
   ODOO_MCP_SESSION_IDLE_TIMEOUT  Seconds of inactivity before an HTTP session
                            is closed and its resources freed (default: never)
+  ODOO_MCP_PER_SESSION_AUTH  Multi-user mode: each caller authenticates as
+                           their own Odoo user via HTTP headers instead of
+                           sharing ODOO_API_KEY/ODOO_USER (default: false;
+                           requires ODOO_MCP_TRANSPORT=streamable-http)
+  ODOO_MCP_SESSION_USER_HEADER  HTTP header carrying the caller's Odoo
+                           username (default: X-Odoo-User)
+  ODOO_MCP_SESSION_API_KEY_HEADER  HTTP header carrying the caller's Odoo
+                           API key (default: X-Odoo-Api-Key)
+  ODOO_MCP_SESSION_CONNECTION_IDLE_TIMEOUT  Seconds a per-user connection
+                           may sit idle before it's evicted (default: 1800)
 
 For more information, visit: https://github.com/ivnvxd/mcp-server-odoo""",
     )
