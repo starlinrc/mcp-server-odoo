@@ -118,34 +118,17 @@ def extract_session_credentials(
     situation or an error.
     """
     if ctx is None:
-        logger.info("Per-session auth: call has no MCP context — using global fallback")
         return None
     request_context = getattr(ctx, "request_context", None)
     request = getattr(request_context, "request", None) if request_context else None
     headers = getattr(request, "headers", None)
     if headers is None:
-        logger.info(
-            "Per-session auth: call's context has no HTTP request attached — using global fallback"
-        )
         return None
 
     username = headers.get(user_header)
     api_key = headers.get(api_key_header)
     if not username or not api_key:
-        # Logging the header NAMES (never values) reveals whether the proxy in
-        # front of this server is stripping the expected header entirely, vs.
-        # the client simply not sending it.
-        logger.info(
-            "Per-session auth: missing header(s) on this call (%s present=%s, "
-            "%s present=%s); headers seen=%s",
-            user_header,
-            bool(username),
-            api_key_header,
-            bool(api_key),
-            list(headers.keys()),
-        )
         return None
-    logger.info("Per-session auth: resolved credentials for user '%s'", username.strip())
     return SessionCredentials(username=username.strip(), api_key=api_key.strip())
 
 
