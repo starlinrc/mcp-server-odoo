@@ -267,9 +267,15 @@ class OdooMCPServer:
             ctx, self.config.session_user_header, self.config.session_api_key_header
         )
         if creds is not None:
+            logger.info(
+                "Per-session auth: routing call to pooled connection for '%s'", creds.username
+            )
             return await self._session_pool.get(creds)
 
         if self.connection and self.access_controller:
+            logger.info(
+                "Per-session auth: no per-call credentials — routing to shared fallback connection"
+            )
             return self.connection, self.access_controller
 
         raise MissingSessionCredentialsError(
